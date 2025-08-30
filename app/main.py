@@ -5,10 +5,12 @@ import redis
 import asyncio
 import logging
 import requests
+from typing import List, cast
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from openai import OpenAI, APIError
+from openai.types.chat import ChatCompletionMessageParam
 
 # --- 1. 로깅 설정 ---
 # 로그 포맷 및 레벨 설정
@@ -76,10 +78,11 @@ async def basic(request: Request):
     redis_key = f"history:{user_id}"
     # Redis는 문자열 리스트로 저장하므로, 각 문자열을 JSON으로 파싱
     history_str_list = redis_client.lrange(redis_key, -N_HISTORY, -1)
-    user_history = []
+    user_history: List[ChatCompletionMessageParam] = []
     for item in history_str_list:
         try:
-            user_history.append(json.loads(item))
+            loaded_item = json.loads(item)
+            user_history.append(cast(ChatCompletionMessageParam, loaded_item))
         except json.JSONDecodeError:
             logger.warning(
                 f"Redis에서 손상된 대화 기록 발견 (key: {redis_key}): {item}"
@@ -87,12 +90,10 @@ async def basic(request: Request):
 
     logger.info(f"수신된 쿼리: {query} (사용자 ID: {user_id})")
 
-    answer_func = lambda: simple_answer(query, user_history)
-
     if not callback_url:
         logger.info("Callback URL이 없으므로 즉시 답변을 시도합니다.")
         # content = simple_answer(query)
-        content = answer_func()
+        content = simple_answer(query, user_history)
         update_history_in_redis(redis_key, query, content)  # Redis에 대화 기록 업데이트
         return build_kakao_response(content)
 
@@ -105,7 +106,7 @@ async def basic(request: Request):
     # simple_answer 함수 즉시 실행, 그 작업 자체를 llm_task 라는 Future 객체로 만듦
     # None: asyncio 기본 ThreadPoolExecutor 사용
     # llm_task = loop.run_in_executor(None, simple_answer, query)
-    llm_task = loop.run_in_executor(None, answer_func)
+    llm_task = loop.run_in_executor(None, simple_answer, query, user_history)
 
     # 지정된 시간(SKILL_TIMEOUT) 동안 기다리는 비동기 함수
     # 이벤트 루프에 등록만 해놓고, 그 동안 다른 작업 실행될 수 있게 제어권 넘김
@@ -132,7 +133,7 @@ async def basic(request: Request):
         logger.info(
             f"응답 지연 감지 (소요 시간 > {SKILL_TIMEOUT}초). 콜백을 사용합니다."
         )
-        loop.create_task(process_and_callback(llm_task, callback_url))
+        loop.create_task(process_and_callback(llm_task, callback_url, redis_key, query))
         return {"version": "2.0", "useCallback": True, "template": {}}
 
 
@@ -144,8 +145,8 @@ async def process_and_callback(llm_task, callback_url, redis_key, query):
         logger.info("백그라운드 LLM 작업 완료. 콜백을 전송합니다.")
         call_kakao_callback(callback_url, content)
         update_history_in_redis(redis_key, query, content)  # Redis에 대화 기록 업데이트
-    except Exception as e:
-        logger.error(f"백그라운드 작업 실패: {e}")
+    except Exception as exc:
+        logger.error(f"백그라운드 작업 실패: {exc}")
         error_message = "죄송합니다, 답변을 생성하는 데 문제가 발생했습니다."
         call_kakao_callback(callback_url, error_message)
 
@@ -162,7 +163,7 @@ def update_history_in_redis(key: str, user_query: str, assistant_response: str):
     pipe.execute()
 
 
-def simple_answer(query: str, history: list) -> str:
+def simple_answer(query: str, history: List[ChatCompletionMessageParam]) -> str:
     """LLM API를 호출하여 답변을 생성"""
 
     # 시스템 프롬프트 정의
@@ -188,7 +189,7 @@ def simple_answer(query: str, history: list) -> str:
     🍌 Banana: A long, yellow fruit.
     """
 
-    messages = (
+    messages: List[ChatCompletionMessageParam] = (
         [{"role": "system", "content": system_prompt}]
         + history
         + [{"role": "user", "content": query}]
@@ -201,11 +202,11 @@ def simple_answer(query: str, history: list) -> str:
             timeout=20,  # 백그라운드 작업을 고려해 넉넉한 타임아웃
         )
         return response.choices[0].message.content
-    except APIError as e:
-        logger.error(f"LLM API 오류 발생: {e}")
+    except APIError as exc:
+        logger.error(f"LLM API 오류 발생: {exc}")
         return "API 오류가 발생하여 답변을 가져올 수 없습니다."
-    except Exception as e:
-        logger.error(f"simple_answer 내 알 수 없는 오류: {e}")
+    except Exception as exc:
+        logger.error(f"simple_answer 내 알 수 없는 오류: {exc}")
         return "알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
 
@@ -217,8 +218,8 @@ def call_kakao_callback(callback_url: str, content: str):
         resp = requests.post(callback_url, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()  # 2xx 상태 코드가 아니면 예외 발생
         logger.info(f"콜백 성공: {resp.status_code} {resp.text}")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"콜백 실패: {e}")
+    except requests.exceptions.RequestException as exc:
+        logger.error(f"콜백 실패: {exc}")
 
 
 def build_kakao_response(content: str) -> dict:

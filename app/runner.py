@@ -1,16 +1,14 @@
 import uvicorn
 import logging.config
-import sys
 
 
-# healthcheck 로그를 필터링하는 최종 클래스
+# healthcheck 로그 필터링 클래스
 class HealthCheckFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        # 디버그 로그를 통해 확인된 uvicorn access 로그의 원시 데이터 구조:
+        # uvicorn access 로그의 원시 데이터 구조:
         # record.args = (client_addr, method, path, http_version, status_code)
         # 예: ('10.0.0.142:0', 'GET', '/healthcheck', '1.0', 200)
 
-        # 이 구조에 맞춰 경로와 상태 코드를 직접 확인합니다.
         if isinstance(record.args, tuple) and len(record.args) == 5:
             path = record.args[2]  # 3번째 요소: '/healthcheck'
             status_code = record.args[4]  # 5번째 요소: 200
@@ -21,7 +19,7 @@ class HealthCheckFilter(logging.Filter):
         return True  # 그 외 모든 경우는 로그를 남김
 
 
-# 사용할 로깅 설정 (Python Dictionary 형태) - 이 부분은 수정 없음
+# 사용할 로깅 설정 (Python Dictionary 형태)
 LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
