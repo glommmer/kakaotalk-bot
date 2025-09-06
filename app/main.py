@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import asyncio
@@ -42,7 +43,7 @@ else:
 
 # --- 3. 상수 및 클라이언트 초기화 ---
 # 카카오톡 스킬 타임아웃(5초)보다 짧은 시간 설정
-SKILL_TIMEOUT = int(os.getenv("SKILL_TIMEOUT", 4.5))
+SKILL_TIMEOUT = float(os.getenv("SKILL_TIMEOUT", 4.5))
 N_HISTORY = int(os.getenv("N_HISTORY", 10))
 
 client: OpenAI
@@ -204,6 +205,16 @@ def web_search(query: str) -> str:
     return "\n".join(results)
 
 
+def _parse_p_tag(text: str) -> str:
+    """<p> 태그 안의 내용 추출, 태그가 없으면 원본 텍스트 반환"""
+    match = re.search(r"<p>(.*?)</p>", text, re.DOTALL)
+    if match:
+        logger.info("Parsing <p> tag.")
+        return match.group(1).strip()
+    # logger.warning("응답에서 <p> 태그를 찾을 수 없어 원본 텍스트를 반환합니다.")
+    return text
+
+
 def simple_answer(query: str, history: List[ChatCompletionMessageParam]) -> str:
     """LLM API를 호출하여 답변을 생성"""
 
@@ -258,12 +269,15 @@ def simple_answer(query: str, history: List[ChatCompletionMessageParam]) -> str:
             synthesizer_prompt = f"""
             You are an AI assistant that answers user questions based on the given web search results.
             Do not mention anything not found in the search results, and synthesize your answer using only the provided information.
+            **Crucially, you MUST wrap your final, complete answer in a single <p> tag.** For example: <p>이것이 최종 답변입니다.</p>
         
             [Web Search Results]
             {truncated_results}
         
             [User's Original Question]
             {query}
+            
+            [Your Final Answer in <p> tag]
             """
             messages = history + [{"role": "user", "content": synthesizer_prompt}]
 
@@ -279,7 +293,8 @@ def simple_answer(query: str, history: List[ChatCompletionMessageParam]) -> str:
     # 최종 답변 생성
     system_prompt = """
     You are a helpful AI assistant. 
-    Your response must be in Korean and formatted for a text messenger (no markdown).
+    Your response must be in Korean and formatted for a text messenger.
+    Never use markdown formats such as ##, **.
     """
 
     final_messages: List[ChatCompletionMessageParam] = [{"role": "system", "content": system_prompt}] + messages  # type: ignore
@@ -288,7 +303,13 @@ def simple_answer(query: str, history: List[ChatCompletionMessageParam]) -> str:
         final_response = client.chat.completions.create(
             model="ax4", messages=final_messages, timeout=20
         )
-        return final_response.choices[0].message.content
+
+        content_with_tag = final_response.choices[0].message.content
+        final_content = _parse_p_tag(content_with_tag)
+
+        # return final_response.choices[0].message.content
+        return final_content
+
     except APIError as exc:
         logger.error(f"LLM API 오류 발생: {exc}")
         return "API 오류가 발생하여 답변을 가져올 수 없습니다."
